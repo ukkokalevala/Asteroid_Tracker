@@ -1,0 +1,182 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <time.h>
+//#include "secrets.h"
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define SDA_PIN 7
+#define SCL_PIN 6
+#define BUTTON_PIN 4
+
+const char* ssid = "yourSSID";
+const char* password = "yourPASSWORD";
+const char* apiKey = "yourAPI KEY";
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+struct Asteroid {
+  String name;
+  String velocity;
+  String missDistance;
+};
+
+std::vector<Asteroid> asteroids;
+int currentIndex = 0;
+bool buttonPressed = false;
+
+// Screen saver variables
+unsigned long lastInteraction = 0;
+const unsigned long screenTimeout = 2 * 60 * 1000;  // 2 minutes
+bool screenSaverActive = false;
+
+void IRAM_ATTR handleButton() {
+  buttonPressed = true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButton, FALLING);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED init failed");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("Connecting WiFi...");
+  display.display();
+
+  WiFi.begin(ssid, password);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  display.clearDisplay();
+  if (WiFi.status() != WL_CONNECTED) {
+    display.setCursor(0, 0);
+    display.print("WiFi failed");
+    display.display();
+    return;
+  }
+
+  display.setCursor(0, 0);
+  display.print("WiFi OK, syncing...");
+  display.display();
+
+  configTime(0, 0, "pool.ntp.org");
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Time error");
+    display.display();
+    return;
+  }
+
+  char dateStr[11];
+  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &timeinfo);
+  String today = dateStr;
+  Serial.println("Date: " + today);
+
+  fetchAsteroidData(today);
+
+  if (!asteroids.empty()) {
+    showAsteroid(currentIndex);
+    lastInteraction = millis();  // Initialize interaction timer
+  } else {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("No NEOs today");
+    display.display();
+  }
+}
+
+void fetchAsteroidData(String date) {
+  HTTPClient http;
+  String url = "https://api.nasa.gov/neo/rest/v1/feed?start_date=" + date + "&end_date=" + date + "&api_key=" + apiKey;
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+    Serial.println("HTTP error: " + String(httpCode));
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  DynamicJsonDocument doc(16384);
+  DeserializationError error = deserializeJson(doc, payload);
+  if (error) {
+    Serial.println("JSON parse failed");
+    return;
+  }
+
+  JsonArray neos = doc["near_earth_objects"][date];
+  for (JsonObject obj : neos) {
+    Asteroid a;
+    a.name = obj["name"].as<String>();
+    a.velocity = obj["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"].as<String>();
+    a.missDistance = obj["close_approach_data"][0]["miss_distance"]["kilometers"].as<String>();
+    asteroids.push_back(a);
+  }
+}
+
+void loop() {
+  if (buttonPressed) {
+    buttonPressed = false;
+
+    if (screenSaverActive) {
+      screenSaverActive = false; // Screen saver turns off the OLED after 2 minutes of inactivity and turns it back on with a button press
+      display.ssd1306_command(SSD1306_DISPLAYON);  // Turn OLED back on
+      showAsteroid(currentIndex);
+    } else {
+      currentIndex = (currentIndex + 1) % asteroids.size();
+      showAsteroid(currentIndex);
+    }
+
+    lastInteraction = millis();  // Reset timer
+    delay(200);  // Debounce
+  }
+
+  if (!screenSaverActive && millis() - lastInteraction > screenTimeout) {
+    screenSaverActive = true;
+    display.clearDisplay();
+    display.display();
+    display.ssd1306_command(SSD1306_DISPLAYOFF);  // Turn OLED off
+  }
+}
+
+void showAsteroid(int i) {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("Asteroid:");
+  display.setCursor(0, 10);
+  display.print(asteroids[i].name.substring(0, 16));
+
+  display.setCursor(0, 28);
+  display.print("Vel:");
+  display.print(asteroids[i].velocity.substring(0, 6));
+  display.print(" km/h");
+
+  display.setCursor(0, 46);
+  display.print("Dist:");
+  display.print(asteroids[i].missDistance.substring(0, 6));
+  display.print(" km");
+
+  display.display();
+}
